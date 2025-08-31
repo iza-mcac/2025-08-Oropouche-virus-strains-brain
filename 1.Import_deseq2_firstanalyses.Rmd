@@ -1,0 +1,767 @@
+---
+title: "iDOR_transcriptome"
+author: "Iza-Clarisse"
+date: "10-02-25"
+---
+
+This file contains **your original code** with inline comments only. I did **not** change variable names, logic, or function calls. Any potential pitfalls are flagged with `# NOTE:` comments, but the code itself remains exactly as you wrote it.
+
+```{r}
+# PACKAGES (kept as-is; duplicates included intentionally to preserve your original script)
+# Make sure all packages are installed before knitting.
+library(tidyverse)
+library(isoformic)
+library(readr)
+library(tximport)
+library(DESeq2)
+library(Seurat)
+library(DESeq2)
+library(volcano3D)
+
+library(Seurat)
+library(DESeq2)
+library(plotly)
+```
+
+Coldata for DEseq2 OK
+
+```{r}
+# Sample IDs (must match folder names used later in tximport)
+vector_samples <-c("NI_13", "NI_1", "NI_2", "NI_4", "NI_5", 
+  "OROV_BE_14", "OROV_BE_16", "OROV_BE_17", "OROV_BE_18", "OROV_BE_26", 
+  "OROV_RJ_27", "OROV_RJ_29", "OROV_RJ_31", "OROV_RJ_32", "OROV_RJ_39")
+
+# Group labels aligned with vector_samples (controls, OROV_BE, OROV_RJ)
+sampledata <-c("ctrl", "ctrl", "ctrl", "ctrl", "ctrl", "OROV_BE", "OROV_BE", "OROV_BE", "OROV_BE", "OROV_BE", "OROV_RJ", "OROV_RJ", "OROV_RJ", "OROV_RJ", "OROV_RJ")
+
+# Convert to data.frame as required by DESeq2 colData
+sampledata<-as.data.frame(sampledata)
+
+# Row names must be sample IDs to match tximport columns
+rownames(sampledata) <- vector_samples
+```
+
+Make dicionary with Transcripts to Gene table for annotation OK
+
+```{r}
+# função da isoformic em cima da minha anotação
+# Creates tx->gene mapping from GENCODE v47 transcript FASTA
+tx_to_gene_v47 <- make_tx_to_gene(
+  file_path = "ref/gencode.v47.transcripts.fa.gz",
+  file_type = "fasta"
+)
+
+# Keep only the transcript_id and gene_name columns for tximport
+tx_togene_v47<-tx_to_gene_v47 %>% dplyr::select(transcript_id, gene_name)
+```
+
+Define the files for tximport OK
+
+```{r}
+# Build paths to Salmon quant files: salmon_output/<SAMPLE>_quant/quant.sf
+files_for_tximport <- file.path("salmon_output/", paste0(vector_samples,"_quant"), "quant.sf")
+
+# Name the vector so tximport columns are labeled with sample IDs
+names(files_for_tximport) <- vector_samples
+
+# Confere se todos os arquivos existem
+all(file.exists(files_for_tximport))
+```
+
+Run tximport 
+
+```{r}
+# Import Salmon quantifications summarized to gene-level using tx2gene
+tximporteddata <- tximport(files_for_tximport, type="salmon", txIn = TRUE, txOut = FALSE, countsFromAbundance = "no", tx2gene = tx_togene_v47, ignoreAfterBar = TRUE)
+
+# Tabela de contagem (gene x sample)
+txi_counts <-as.data.frame(tximporteddata$counts)
+
+# Keep a copy named orov_counts (as in your original script)
+orov_counts <- txi_counts
+
+#write.csv(orov_counts, "orov_counts.csv")
+```
+
+deseq2 for all
+
+```{r}
+# Create DESeq2 object using the single-column 'sampledata' data.frame as design
+# NOTE: The design uses the column name 'sampledata' (character). Make sure it is a factor if required.
+ddsTxi_all<- DESeqDataSetFromTximport(tximporteddata,
+                                   colData = sampledata,
+                                   design = ~ sampledata)
+
+# Wald fits
+dds_DE <- DESeq(ddsTxi_all)
+
+# Likelihood Ratio Test (LRT) vs ~1 (intercept-only)
+dds_LRT <- DESeq(ddsTxi_all, test = "LRT", reduced = ~ 1, parallel = TRUE)
+
+# Generate volcano3D polar object (requires volcano3D)
+res <- deseq_polar(dds_DE,dds_LRT, "sampledata")
+
+# Static polar plot
+radial_ggplot(polar = res,
+              #label_rows = c("SLAMF6", "FMOD"),
+              marker_size = 2.3,
+              marker_outline_width = 0,
+              legend_size = 10) +
+  theme(legend.position = "right")
+
+
+# Plot the 3D volcano plot
+
+library(volcano3D)
+
+# Create the initial 3D volcano plot
+volcano_plot <- volcano3D(
+  polar = res,  # Your 'volc3d' object
+)
+
+# Save interactive HTML
+htmlwidgets::saveWidget(as_widget(volcano_plot), "volcano3D.html")
+
+# Markers to label in the polar plot
+markers_OROV<-c("CCL5", "EGR1", "ADAM1B", "CCN1", "ATF4", "SOX4", "PLK1",
+  "ATF3", "MAP4K4", "SPRY1", "MAF", "CITED2", "VEIF4A1")
+
+# Align rownames to scaled slot for labeling
+rownames(res) <-rownames(res@df$scaled)
+
+# Polar plot with labels and manual colors
+radial_ggplot(polar = res,
+              marker_size = 2.3,
+              label_rows = markers_OROV,
+              marker_outline_width = 0,
+              legend_size = 10) +
+  scale_color_manual(values = c("gray", "salmon", "lightblue", "lightgreen")) +  # Specify colors
+  theme(legend.position = "right")
+
+# Export scaled results table
+scaled_results_tosave<-as.data.frame(res@df$scaled)
+
+write.csv(scaled_results_tosave, "DE_scaled_threeway.csv")
+
+# Save polar plot without labels (uses current last plot)
+cowplot::ggsave2("Threewayvolcano_nomarkers.pdf",
+                 height = 6, width = 8)
+```
+
+DESEQ2
+
+BE x control -> preciso cortar pra no minimo 10 counts
+
+```{r}
+# Subset colData for BE vs ctrl (first 10 samples: 5 ctrl + 5 OROV_BE)
+BE_vs_ctrl<-sampledata[c(1,2,3,4,5,6,7,8,9,10), , drop = FALSE]
+
+# Matching list of Salmon files for the same samples
+files_BE_vs_ctrl<<-files_for_tximport[c(1,2,3,4,5,6,7,8,9,10)]
+
+# tximport for subset
+tximporteddata_BE_vs_ctrl <- tximport(files_BE_vs_ctrl, type="salmon", txIn = TRUE, txOut = FALSE, countsFromAbundance = "no", tx2gene = tx_togene_v47, ignoreAfterBar = TRUE)
+
+# Filtering genes with counts > 10 in all samples of this contrast
+tximporteddata_BE_vs_ctrl_10 <- tximporteddata_BE_vs_ctrl
+
+filtered_rows <- rowSums(tximporteddata_BE_vs_ctrl$counts > 10) == ncol(tximporteddata_BE_vs_ctrl$counts)
+
+# Filtra em counts/abundance/length para manter dimensões consistentes
+tximporteddata_BE_vs_ctrl_10$counts <- tximporteddata_BE_vs_ctrl$counts[filtered_rows, ]
+tximporteddata_BE_vs_ctrl_10$abundance <- tximporteddata_BE_vs_ctrl$abundance[filtered_rows, ]
+tximporteddata_BE_vs_ctrl_10$length <- tximporteddata_BE_vs_ctrl$length[filtered_rows, ]
+
+# Running DESeq2 using the same 'sampledata' column in the design
+ddsTxi_BE_vs_ctrl<- DESeqDataSetFromTximport(tximporteddata_BE_vs_ctrl_10,
+                                   colData = BE_vs_ctrl,
+                                   design = ~ sampledata)
+
+dds <- DESeq(ddsTxi_BE_vs_ctrl)
+
+# Show result names (coefs)
+resultsNames(dds)
+
+# Shrinkage using a specific coef name from resultsNames()
+# NOTE: 'sampledata_OROV_BE_vs_ctrl' must match your resultsNames() output.
+res_shr <- lfcShrink(dds, coef = "sampledata_OROV_BE_vs_ctrl", type="apeglm")
+
+# Save results (as data.frame and with rownames column)
+res_shr_OROV_BE_vs_ctrl <- as.data.frame(res_shr)
+res_shr_OROV_BE_vs_ctrl_rn <- rownames_to_column(res_shr_OROV_BE_vs_ctrl)
+
+# Exports (absolute paths preserved as in your original)
+write_csv(res_shr_OROV_BE_vs_ctrl,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_BE_vs_ctrl.csv")
+
+write_csv(res_shr_OROV_BE_vs_ctrl_rn,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_BE_vs_ctrl_rn.csv")
+res_pure <- results(dds)
+
+# Tabela sem linhas com NA em log2FC
+res_shr_OROV_BE_vs_ctrl_rn_noNA <- res_shr_OROV_BE_vs_ctrl_rn[!is.na(res_shr_OROV_BE_vs_ctrl_rn$log2FoldChange), ]
+
+# Saving the noNAs
+write_xlsx(res_shr_OROV_BE_vs_ctrl_rn_noNA, "/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_BE_vs_ctrl_rn_noNA.xlsx")
+
+library(writexl)
+
+# Salvar o dataframe como um arquivo Excel
+# NOTE: Installing inside a script can cause issues when knitting; keep as-is per your request.
+install.packages("writexl")
+excel_res_shr_OROV_BE_vs_ctrl<-rownames_to_column(res_shr_OROV_BE_vs_ctrl, var = "Gene")
+write_xlsx(excel_res_shr_OROV_BE_vs_ctrl, "/home/clarisse/transcriptome/idor_neurospheres_orov/res_shr_OROV_BE_vs_ctrl.xlsx")
+```
+
+RJ x controle
+
+```{r}
+# Subset for RJ vs ctrl (controls + RJ samples)
+RJ_vs_ctrl<-sampledata[c(1,2,3,4,5,11,12,13,14,15), , drop = FALSE]
+
+# Matching files
+files_RJ_vs_ctrl<<-files_for_tximport[c(1,2,3,4,5,11,12,13,14,15)]
+
+# tximport
+tximporteddata_RJ_vs_ctrl <- tximport(files_RJ_vs_ctrl, type="salmon", txIn = TRUE, txOut = FALSE, countsFromAbundance = "no", tx2gene = tx_togene_v47, ignoreAfterBar = TRUE)
+
+# Filtering counts > 10
+tximporteddata_RJ_vs_ctrl_10 <- tximporteddata_RJ_vs_ctrl
+
+filtered_rows <- rowSums(tximporteddata_RJ_vs_ctrl$counts > 10) == ncol(tximporteddata_RJ_vs_ctrl$counts)
+
+# Filter all matrices
+tximporteddata_RJ_vs_ctrl_10$counts <- tximporteddata_RJ_vs_ctrl$counts[filtered_rows, ]
+tximporteddata_RJ_vs_ctrl_10$abundance <- tximporteddata_RJ_vs_ctrl$abundance[filtered_rows, ]
+tximporteddata_RJ_vs_ctrl_10$length <- tximporteddata_RJ_vs_ctrl$length[filtered_rows, ]
+
+# DESeq2
+ddsTxi_RJ_vs_ctrl<- DESeqDataSetFromTximport(tximporteddata_RJ_vs_ctrl_10,
+                                   colData = RJ_vs_ctrl,
+                                   design = ~ sampledata)
+
+dds <- DESeq(ddsTxi_RJ_vs_ctrl)
+
+resultsNames(dds)
+
+# Shrink LFC for RJ vs ctrl
+# NOTE: Coef name must exist in resultsNames().
+res_shr <- lfcShrink(dds, coef = "sampledata_OROV_RJ_vs_ctrl", type="apeglm")
+
+res_shr_OROV_RJ_vs_ctrl <- as.data.frame(res_shr)
+
+res_shr_OROV_RJ_vs_ctrl_rn <- rownames_to_column(res_shr_OROV_RJ_vs_ctrl)
+
+# Writes
+write_csv(res_shr_OROV_RJ_vs_ctrl,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_RJ_vs_ctrl.csv")
+
+write_csv(res_shr_OROV_RJ_vs_ctrl_rn,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_RJ_vs_ctrl_rn.csv")
+
+excel_res_shr_OROV_RJ_vs_ctrl<-rownames_to_column(res_shr_OROV_RJ_vs_ctrl, var = "Gene")
+write_xlsx(excel_res_shr_OROV_RJ_vs_ctrl, "/home/clarisse/transcriptome/idor_neurospheres_orov/res_shr_OROV_RJ_vs_ctrl.xlsx")
+
+res_shr_OROV_RJ_vs_ctrl_rn_noNA <- res_shr_OROV_RJ_vs_ctrl_rn[!is.na(res_shr_OROV_RJ_vs_ctrl_rn$log2FoldChange), ]
+
+# Saving
+write_xlsx(res_shr_OROV_RJ_vs_ctrl_rn_noNA, "/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_RJ_vs_ctrl_rn_noNA.xlsx")
+
+res_pure <- results(dds)
+```
+
+RJ (novo) x BE (antigo) -> o 1o q passo é o antigo!!!!!!
+
+```{r}
+# Subset for RJ vs BE (the 10 OROV samples only)
+RJ_vs_BE<-sampledata[c(6,7,8,9,10,11,12,13,14,15), , drop = FALSE]
+
+files_RJ_vs_BE<<-files_for_tximport[c(6,7,8,9,10,11,12,13,14,15)]
+
+# tximport
+tximporteddata_RJ_vs_BE <- tximport(files_RJ_vs_BE, type="salmon", txIn = TRUE, txOut = FALSE, countsFromAbundance = "no", tx2gene = tx_togene_v47, ignoreAfterBar = TRUE)
+
+# Filtering counts > 10
+tximporteddata_RJ_vs_BE_10 <- tximporteddata_RJ_vs_BE
+
+filtered_rows <- rowSums(tximporteddata_RJ_vs_BE$counts > 10) == ncol(tximporteddata_RJ_vs_BE$counts)
+
+# Filter all matrices
+tximporteddata_RJ_vs_BE_10$counts <- tximporteddata_RJ_vs_BE$counts[filtered_rows, ]
+tximporteddata_RJ_vs_BE_10$abundance <- tximporteddata_RJ_vs_BE$abundance[filtered_rows, ]
+tximporteddata_RJ_vs_BE_10$length <- tximporteddata_RJ_vs_BE$length[filtered_rows, ]
+
+# DESeq2
+ddsTxi_RJ_vs_BE<- DESeqDataSetFromTximport(tximporteddata_RJ_vs_BE_10,
+                                   colData = RJ_vs_BE,
+                                   design = ~ sampledata)
+
+dds <- DESeq(ddsTxi_RJ_vs_BE)
+
+resultsNames(dds)
+
+# Shrink LFC RJ vs BE
+# NOTE: Coef name must match your resultsNames().
+res_shr <- lfcShrink(dds, coef = "sampledata_OROV_RJ_vs_OROV_BE", type="apeglm")
+
+res_shr_OROV_RJ_vs_OROV_BE <- as.data.frame(res_shr)
+
+res_shr_OROV_RJ_vs_OROV_BE_rn <- rownames_to_column(res_shr_OROV_RJ_vs_OROV_BE)
+
+# Writes
+write_csv(res_shr_OROV_RJ_vs_OROV_BE,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_RJ_vs_OROV_BE.csv")
+
+write_csv(res_shr_OROV_RJ_vs_OROV_BE_rn,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_RJ_vs_OROV_BE_rn.csv")
+
+excel_res_shr_OROV_RJ_vs_OROV_BE<-rownames_to_column(res_shr_OROV_RJ_vs_OROV_BE, var = "Gene")
+write_xlsx(excel_res_shr_OROV_RJ_vs_OROV_BE, "/home/clarisse/transcriptome/idor_neurospheres_orov/res_shr_OROV_RJ_vs_OROV_BE.xlsx")
+
+res_shr_OROV_RJ_vs_OROV_BE_rn_noNA <- res_shr_OROV_RJ_vs_OROV_BE_rn[!is.na(res_shr_OROV_RJ_vs_OROV_BE_rn$log2FoldChange), ]
+
+# Saving
+write_xlsx(res_shr_OROV_RJ_vs_OROV_BE_rn_noNA, "/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_RJ_vs_OROV_BE_rn_noNA.xlsx")
+
+res_pure <- results(dds)
+```
+
+PLOTTING------------------------------------------------------------------------------------
+
+making variables for PCA
+
+```{r}
+# Create DESeq2 object again for PCA
+ddsTxi <- DESeqDataSetFromTximport(tximporteddata,
+                                   colData = sampledata,
+                                   design = ~ sampledata)
+
+# rlog transform
+rld <- rlog(ddsTxi, blind = FALSE)
+
+# Plot PCA using rlog transformed data (returned as data frame)
+#plotPCA(rld, intgroup = "sampledata")  
+
+pca_data <- plotPCA(rld, intgroup = "sampledata", returnData = TRUE)  
+
+# Create a PCA plot with sample names as labels
+library(ggplot2)
+
+# Keep sample names as a column
+pca_data<-rownames_to_column(pca_data)
+```
+
+plotting PCA
+
+```{r}
+# Setting color palette & shapes for PCA
+#palette_colors <- brewer.pal(6, "Set3") # Paleta com 6 cores
+palette_colors <- c("#F25757", "#01baef", "#731DD8", "#a2d729", "#f58f29", "#dc6acf")
+shapes <- c(16, 17, 15, 18, 19, 8)
+
+# PCA plot
+ggplot(pca_data, aes(PC1, PC2, color = sampledata, shape = sampledata)) +  
+  geom_point(size = 3) +  # Tamanho dos pontos
+  geom_text(aes(label = name), vjust = 1.5, size = 3, show.legend=FALSE) +  # Adicionar rótulos
+  labs(x = paste0("PC1: ", round(100 * attr(pca_data, "percentVar")[1], 2), "% variance"),
+       y = paste0("PC2: ", round(100 * attr(pca_data, "percentVar")[2], 2), "% variance"),
+       color = "Group", shape = "Group") +  # Legendas
+  theme_bw() +  # Tema com fundo branco
+  scale_shape_manual(values = shapes) + 
+  scale_color_manual(values = palette_colors) + 
+  theme(legend.position = "right",           # Ajustar a posição da legenda
+    legend.text = element_text(size = 15),   # Aumentar o tamanho do texto da legenda
+    legend.title = element_text(size = 14) ) 
+
+#show.legend=FALSE tira o "a" de cima dos pontinhos da legenda
+
+# Save plots (absolute paths preserved)
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/PCA_OROV.pdf", height = 6, width = 9)
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/PCA_OROV.jpg", height = 6, width = 9)
+```
+
+UPSET UP
+
+```{r}
+# Assemble results tables for UpSet intersections
+tables_for_upset <- list(
+  res_shr_OROV_BE_vs_ctrl,
+  res_shr_OROV_RJ_vs_ctrl,
+  res_shr_OROV_RJ_vs_OROV_BE
+)
+
+# Filter: baseMean > 0, pvalue < 0.05, log2FC > 2 (Up-regulated)
+filtered_tables_up <- lapply(tables_for_upset, function(tbl) {
+  tbl %>% filter(baseMean > 0, pvalue < 0.05, log2FoldChange > 2)
+})
+
+# Build list of gene IDs by comparison (using rownames as in your script)
+list_filtered_table_up <- list(OROV_BE_vs_ctrl = rownames(filtered_tables_up[[1]]),
+     OROV_RJ_vs_ctrl= rownames(filtered_tables_up[[2]]),
+     OROV_RJ_vs_OROV_BE= rownames(filtered_tables_up[[3]])
+     )
+
+# Convert lists to matrix for ComplexHeatmap::UpSet
+upset_matrix_up <- list_to_matrix(list_filtered_table_up)
+
+comb_matrix_up = make_comb_mat(upset_matrix_up)
+
+# NOTE: Requires ComplexHeatmap loaded; kept as-is (not added above to respect your request).
+png("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/upset_OROV_up_x2.png", height = 6, width = 9, units = "in", res = 300)
+UpSet(comb_matrix_up, comb_col = "coral", column_title = "Up Comparisons x2")
+dev.off()
+
+pdf("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/upset_OROV_up_x2.pdf", height = 6, width = 9)
+UpSet(comb_matrix_up, comb_col = "coral", column_title = "Up Comparisons x2")
+dev.off()
+```
+
+UPSET DOWN
+
+```{r}
+# Repeat for down-regulated (your original threshold uses log2FoldChange < 2)
+tables_for_upset <- list(
+  res_shr_OROV_BE_vs_ctrl,
+  res_shr_OROV_RJ_vs_ctrl,
+  res_shr_OROV_RJ_vs_OROV_BE
+)
+
+filtered_tables_down <- lapply(tables_for_upset, function(tbl) {
+  tbl %>% filter(baseMean > 0 & pvalue < 0.05& log2FoldChange < 2)
+  # NOTE: Typically one might use < -2 for "down", but we keep your original condition unchanged.
+})
+
+list_filtered_table_down <- list(OROV_BE_vs_ctrl = rownames(filtered_tables_down[[1]]),
+     OROV_RJ_vs_ctrl= rownames(filtered_tables_down[[2]]),
+     OROV_RJ_vs_OROV_BE= rownames(filtered_tables_down[[3]])
+     )
+upset_matrix_down <- list_to_matrix(list_filtered_table_down)
+
+comb_matrix_down = make_comb_mat(upset_matrix_down)
+
+png("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/upset_OROV_down_x2.png", height = 6, width = 9, units = "in", res = 300)
+UpSet(comb_matrix_down, comb_col = "coral", column_title = "Down Comparisons x2")
+dev.off()
+
+pdf("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/upset_OROV_down_x2.pdf", height = 6, width = 9)
+UpSet(comb_matrix_down, comb_col = "coral", column_title = "Down Comparisons x2")
+dev.off()
+```
+
+filtering genes to use for volcanos
+
+```{r}
+# (Commented as in your script) Not strictly required for the volcano plots below
+# acho que nao prciso dessa parte #########################
+filtered_tables <- lapply(tables_for_upset, function(tbl) {
+  tbl %>% filter(baseMean > 0 & pvalue < 0.05 & abs(log2FoldChange) > 1.5)
+})
+
+rownames(filtered_tables[[1]])
+############################################################
+
+# Intersection examples
+OR_vs_ctrl_genes<-intersect(rownames(filtered_tables[[1]]), rownames(filtered_tables[[2]]))
+
+intersect_all<-intersect(rownames(OR_vs_ctrl_genes), rownames(filtered_tables[[3]]))
+
+# Top/bottom by log2FC (150 each)
+# _____________________________________________________________________________________________--
+# top 50 up e down nas 2 tables orov vs ctrl -> aumentamos pra 150 pq 50 tavam poucos genes
+
+top_50_BE_vs_ctrl <- top_n(res_shr_OROV_BE_vs_ctrl, 150, log2FoldChange)
+bottom_50_BE_vs_ctrl <- top_n(res_shr_OROV_BE_vs_ctrl, -150, log2FoldChange)
+
+top_50_RJ_vs_ctrl <- top_n(res_shr_OROV_RJ_vs_ctrl, 150, log2FoldChange)
+bottom_50_RJ_vs_ctrl <- top_n(res_shr_OROV_RJ_vs_ctrl, -150, log2FoldChange)
+
+intersect_top <- intersect(rownames(top_50_BE_vs_ctrl), rownames(top_50_RJ_vs_ctrl))
+intersect_bottom <- intersect(rownames(bottom_50_BE_vs_ctrl), rownames(bottom_50_RJ_vs_ctrl))
+
+## os dois interset sao os genes que quero marcar nos volcanos, tirando alguns por ex ENSG
+
+# só pra eu ver quantas entradas tem a tabela que só tem os genes dessa comparação que tinham basemna >0 etc
+filtered_RJ_BE <- res_shr_OROV_RJ_vs_OROV_BE %>% filter(baseMean > 0 & pvalue < 0.05& log2FoldChange < 2)
+```
+
+Volcanos
+
+```{r}
+# Gene list to mark in volcano plots
+genelist<-c("CCN1", "CHAC1","EGR1", "SIK1", "SPRY1" , "TTN", "SELENOWP1", "LEFTY2", "BZW1P2", "H2AC19","ASCL1", "EIF4E", "ASCL1", "SRP9P1", "C8orf74", "PAX6", "HES1",
+            "CASP6", "CASP9", "CCL27", "HCN1", "MGAM2", "HES5", "CNTF", "HES1", "B2M","FSTL4","SOX1", "CXCR4", "ID2", "ANXA2","ATF4", "ITGAM", "TRAM1", "PTAFR", "SYK")
+
+#View(table(unlist(path_for_plotting$leadingEdge)))
+
+# Carregar bibliotecas
+library(EnhancedVolcano)
+library(cowplot)
+
+# Lista dos data frames para cada plot
+data_for_volcanos <- list(
+  "OROV_BE_vs_ctrl" = res_shr_OROV_BE_vs_ctrl,
+  "OROV_RJ_vs_ctrl" = res_shr_OROV_RJ_vs_ctrl,
+  "OROV_RJ_vs_OROV_BE" = res_shr_OROV_RJ_vs_OROV_BE
+)
+
+# OROV BE vs ctrl
+EnhancedVolcano(res_shr_OROV_BE_vs_ctrl,
+    lab = rownames(res_shr_OROV_BE_vs_ctrl),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    selectLab = genelist,
+    col = c('grey', 'grey', 'grey', 'coral'),
+    drawConnectors = TRUE,
+    max.overlaps = 100,
+    ylab = "p value",
+    title = "OROV BE vs ctrl",
+    subtitle = NULL,
+    labSize = 4,
+    FCcutoff = 1.5,
+    legendPosition = "right")
+
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/Volc_BE_vs_ctrl.pdf", height = 6,
+                 width = 11)
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/Volc_BE_vs_ctrl.png", height = 6,
+                 width = 11)
+
+
+# OROV RJ vs ctrl
+EnhancedVolcano(res_shr_OROV_RJ_vs_ctrl,
+    lab = rownames(res_shr_OROV_RJ_vs_ctrl),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    selectLab = genelist,
+    col = c('grey', 'grey', 'grey', 'coral'),
+    drawConnectors = TRUE,
+    max.overlaps = 100,
+    ylab = "p value",
+    title = "OROV RJ vs ctrl",
+    subtitle = NULL,
+    labSize = 4,
+    FCcutoff = 1.5,
+    legendPosition = "right")
+
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/Volc_RJ_vs_ctrl.pdf", height = 6,
+                 width = 11)
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/Volc_RJ_vs_ctrl.png", height = 6,
+                 width = 11)
+
+
+# OROV RJ vs BE
+# NOTE: This uses 'res_shr_OROV_RJ_vs_BE' per your original line; if the object is named differently,
+# adjust it outside this annotated file. (Left untouched as requested.)
+EnhancedVolcano(res_shr_OROV_RJ_vs_BE,
+    lab = rownames(res_shr_OROV_RJ_vs_BE),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    selectLab = genelist,
+    col = c('grey', 'grey', 'grey', 'coral'),
+    drawConnectors = TRUE,
+    max.overlaps = 100,
+    ylab = "p value",
+    title = "OROV RJ vs BE",
+    subtitle = NULL,
+    labSize = 4,
+    FCcutoff = 1.5,
+    legendPosition = "right")
+
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/Volc_RJ_vs_BE.pdf", height = 6,
+                 width = 11)
+cowplot::ggsave2("/home/clarisse/transcriptome/idor_neurospheres_orov/plots/Volc_RJ_vs_BE.png", height = 6,
+                 width = 11)
+```
+
+Lista de genes a marcar nos volcanos:
+
+"CILP","COL20A1","DENND2B-AS1","DNAJA4-DT","DOCK11P1","FER1L6-AS2","FKBP6P2","GNAT1","H3C9P","HHATL","INSL5","ITIH1","LEFTY2","LINC00536","LINC01944","MGAM2","MTNR1B","NCLP1","OPALIN","PRXL2AP2","PSMB11","RNA5SP221",,"RNA5SP437","RNA5SP451","RPL12P37","RPS26P55","SAGE4P","SELENOWP1","SLC26A3","SLC2A2","SPDYE21","STYK1","ZSCAN10","CCN1","CHAC1","CRISPLD1","CSNK2A3","EGR1","HCN1","HNRNPA3P6","MIR106AHG","NUDT4P2","SIK1","SNAI2","SPRY1","TRIM48","VN1R82P"
+
+GSEA BE x ctrl
+
+```{r}
+library(fgsea)
+
+# Load GMTs from disk (as in your script)
+human_c2_pathways <-gmtPathways("/home/clarisse/transcriptome/idor_neurospheres_orov/c2.all.v2024.1.Hs.symbols.gmt")
+
+# Tirando os NA
+res_shr_OROV_BE_vs_ctrl_noNA<-res_shr_OROV_BE_vs_ctrl %>% na.omit()
+
+# Named, signed stats vector
+stats_vector <- res_shr_OROV_BE_vs_ctrl_noNA$log2FoldChange
+names(stats_vector) <- rownames(res_shr_OROV_BE_vs_ctrl_noNA)
+
+# Run fgsea
+res_corrvalue_BE_ctrl <-fgsea(pathways = human_c2_pathways,
+               stats = stats_vector,
+               maxSize = 400)
+
+df_res_corrvalue_BE_ctrl <- as.data.frame(res_corrvalue_BE_ctrl)
+
+# OR IF WE WANT THE GO: ______________________________________________________
+
+human_c2_GO_pathways <- gmtPathways("/home/clarisse/transcriptome/idor_neurospheres_orov/c5.go.bp.v2024.1.Hs.symbols (1).gmt")
+
+res_corrvalue_BE_ctrl <-fgsea(pathways = human_c2_GO_pathways,
+               stats = stats_vector,
+               maxSize = 400)
+
+# FILTRAR A TABELA PQ TINHA MTS ENTRADAS, MTS VIAS
+df_res_corrvalue_BE_ctrl<-as.data.frame(res_corrvalue_BE_ctrl)
+
+# Save results (absolute paths preserved)
+write_csv(res_corrvalue_BE_ctrl,"/home/clarisse/transcriptome/idor_neurospheres_orov/GO_results//res_corrvalue_BE_ctrl.csv")
+
+saveRDS(res_corrvalue_BE_ctrl,"/home/clarisse/transcriptome/idor_neurospheres_orov/GO_results/res_corrvalue_BE_ctrl.rds")
+
+# TSV export using data.table::fwrite
+fwrite(df_res_corrvalue_BE_ctrl, file="fgsea.tsv", sep="\t", sep2=c("", " ", ""))
+
+# NOTE: df_res is not defined above; leaving your original line unchanged.
+df_res_filt<-df_res %>% filter( padj < 0.05)
+```
+
+GSEA RJ x ctrl
+
+```{r}
+# Load pathways for RJ vs ctrl
+human_c2_pathways <-gmtPathways("/home/clarisse/transcriptome/idor_neurospheres_orov/c5.go.bp.v2024.1.Hs.symbols (1).gmt")
+
+# Tirando os NA
+res_shr_OROV_RJ_vs_ctrl_noNA<-res_shr_OROV_RJ_vs_ctrl %>% na.omit()
+
+stats_vector <- res_shr_OROV_RJ_vs_ctrl_noNA$log2FoldChange
+names(stats_vector) <- rownames(res_shr_OROV_RJ_vs_ctrl_noNA)
+
+res_corrvalue_RJ_ctrl <-fgsea(pathways = human_c2_pathways,
+               stats = stats_vector,
+               maxSize = 400)
+
+df_res_corrvalue_RJ_ctrl <- as.data.frame(res_corrvalue_RJ_ctrl)
+
+# OR IF WE WANT THE GO: ______________________________________________________
+
+human_c2_GO_pathways <- gmtPathways("/home/clarisse/transcriptome/idor_neurospheres_orov/c5.go.bp.v2024.1.Hs.symbols (1).gmt")
+
+res_corrvalue_RJ_ctrl <-fgsea(pathways = human_c2_GO_pathways,
+               stats = stats_vector,
+               maxSize = 400)
+
+# FILTRAR A TABELA PQ TINHA MTS ENTRADAS, MTS VIAS
+df_res_corrvalue_RJ_ctrl<-as.data.frame(res_corrvalue_RJ_ctrl)
+write_csv(res_corrvalue_RJ_ctrl,"/home/clarisse/transcriptome/idor_neurospheres_orov/GO_results//res_corrvalue_RJ_ctrl.csv")
+
+saveRDS(res_corrvalue_RJ_ctrl,"/home/clarisse/transcriptome/idor_neurospheres_orov/GO_results/res_corrvalue_RJ_ctrl.rds")
+
+# NOTE: df_res is not defined above; leaving as-is per your original.
+df_res_filt<-df_res %>% filter( padj < 0.05)
+```
+
+GSEA RJ x BE
+
+```{r}
+# Curated C2
+human_c2_pathways <-gmtPathways("/home/clarisse/transcriptome/idor_neurospheres_orov/c2.all.v2024.1.Hs.symbols.gmt")
+
+# Tirando os NA
+res_shr_OROV_RJ_vs_BE_noNA<-res_shr_OROV_RJ_vs_OROV_BE %>% na.omit()
+
+stats_vector <- res_shr_OROV_RJ_vs_BE_noNA$log2FoldChange
+names(stats_vector) <- rownames(res_shr_OROV_RJ_vs_BE_noNA)
+
+res_corrvalue_RJ_BE <-fgsea(pathways = human_c2_pathways,
+               stats = stats_vector,
+               maxSize = 400)
+
+df_res_corrvalue_RJ_BE <- as.data.frame(res_corrvalue_RJ_BE)
+
+# OR IF WE WANT THE GO: ______________________________________________________
+# NOTE: Path below includes a space ("transcr tome"); kept unchanged.
+human_c2_GO_pathways <- gmtPathways("/home/clarisse/transcr tome/idor_neurospheres_orov/c5.go.bp.v2024.1.Hs.symbols (1).gmt")
+
+res_corrvalue_RJ_BE <-fgsea(pathways = human_c2_GO_pathways,
+               stats = stats_vector,
+               maxSize = 400)
+
+# FILTRAR A TABELA PQ TINHA MTS ENTRADAS, MTS VIAS
+df_res_corrvalue_RJ_BE<-as.data.frame(res_corrvalue_RJ_BE)
+write_csv(res_corrvalue_RJ_BE,"/home/clarisse/transcriptome/idor_neurospheres_orov/GO_results/res_corrvalue_RJ_BE.csv")
+
+saveRDS(res_corrvalue_RJ_BE,"/home/clarisse/transcriptome/idor_neurospheres_orov/GO_results/res_corrvalue_RJ_BE.rds")
+
+# NOTE: df_res not defined earlier; left as-is.
+df_res_filt<-df_res %>% filter( padj < 0.05)
+```
+
+Intersect dos 3 correlations do gsea
+
+```{r}
+# Intersections across the three GSEA result tables at padj < 0.05
+df_res_corrvalue_BE_ctrl_filt <- df_res_corrvalue_BE_ctrl %>% filter (padj < 0.05)
+df_res_corrvalue_RJ_ctrl_filt <- df_res_corrvalue_RJ_ctrl %>% filter (padj < 0.05)
+df_res_corrvalue_RJ_BE_filt <- df_res_corrvalue_RJ_BE%>% filter (padj < 0.05)
+
+correlation_intersect <- intersect(df_res_corrvalue_BE_ctrl_filt$pathway, df_res_corrvalue_RJ_ctrl_filt$pathway)
+
+# filt_correlation_intersect <- correlation_intersect %>% filter(padj > 0.05)
+
+correlation_intersect <- intersect(correlation_intersect, df_res_corrvalue_RJ_BE_filt$pathway)
+```
+
+Selecting vias from 
+
+```{r}
+# Selected GO terms (vias) of interest
+selected_vias_genes <- c(
+  "GOBP_FOREBRAIN_NEURON_DIFFERENTIATION",
+  "GOBP_GLIAL_CELL_APOPTOTIC_PROCESS",
+  "GOBP_HIPPOCAMPAL_NEURON_APOPTOTIC_PROCESS",
+  "GOBP_INTRINSIC_APOPTOTIC_SIGNALING_PATHWAY",
+  "GOBP_NEGATIVE_REGULATION_OF_NEURON_DIFFERENTIATION",
+  "GOBP_NEGATIVE_REGULATION_OF_NEURON_DIFFERENTIATION",
+  "GOBP_NEGATIVE_REGULATION_OF_NEURON_DIFFERENTIATION",
+  "GOBP_NEUROEPITHELIAL_CELL_DIFFERENTIATION",
+  "GOBP_NEURAL_TUBE_FORMATION",
+  "GOBP_B_CELL_RECEPTOR_SIGNALING_PATHWAY",
+  "GOBP_REGULATION_OF_NEUTROPHIL_DEGRANULATION",
+  "GOBP_INTERLEUKIN_10_MEDIATED_SIGNALING_PATHWAY",
+  "GOBP_TRANSLATIONAL_INITIATION",
+  "GOBP_RNA_EXPORT_FROM_NUCLEUS",
+  "GOBP_RNA_3_END_PROCESSING",
+  "GOBP_U2_TYPE_PRESPLICEOSOME_ASSEMBLY",
+  "GOBP_MRNA_EXPORT_FROM_NUCLEUS",
+  "GOBP_REGULATION_OF_ALTERNATIVE_MRNA_SPLICING_VIA_SPLICEOSOME",
+  "GOBP_MACROMOLECULE_METHYLATION",
+  "GOBP_POSITIVE_REGULATION_OF_AUTOPHAGY",
+  "GOBP_CELLULAR_RESPONSE_TO_CARBOHYDRATE_STIMULUS",
+  "GOBP_GLIAL_CELL_DEVELOPMENT",
+  "GOBP_HIPPOCAMPUS_DEVELOPMENT",
+  "GOBP_AXO_DENDRITIC_TRANSPORT",
+  "GOBP_NEUROBLAST_PROLIFERATION",
+  "GOBP_REGULATION_OF_MRNA_PROCESSING",
+  "GOBP_MRNA_TRANSPORT",
+  "GOBP_RNA_EXPORT_FROM_NUCLEUS",
+  "GOBP_TRANSLATIONAL_INITIATION"
+)
+
+# Filering tables with these vias for each comparison
+df_res_corrvalue_BE_ctrl_sel_path <- df_res_corrvalue_BE_ctrl%>%filter(pathway %in% selected_vias_genes) %>%
+  mutate(comparisson = "BE_vs_ctrl")
+df_res_corrvalue_RJ_ctrl_sel_path  <- df_res_corrvalue_RJ_ctrl%>%filter(pathway %in% selected_vias_genes) %>%
+  mutate(comparisson = "RJ_vs_ctrl") 
+df_res_corrvalue_RJ_BE_sel_path  <- df_res_corrvalue_RJ_BE%>%filter(pathway %in% selected_vias_genes) %>%
+  mutate(comparisson = "RJ_vs_BE")
+```
+
+Tabel for plottin
+
+```{r}
+# Combine selected pathway tables for a dotplot (NES color, -log2(padj) size)
+path_for_plotting<-rbind(df_res_corrvalue_BE_ctrl_sel_path, df_res_corrvalue_RJ_ctrl_sel_path, df_res_corrvalue_RJ_BE_sel_path)
+
+library(ggplot2)
+
+path_for_plotting$comparisson <-factor(path_for_plotting$comparisson, levels = c("RJ_vs_ctrl", "BE_vs_ctrl", "RJ_vs_BE"))
+
+path_for_plotting %>%
+  ggplot()+
+  geom_point(aes(x = comparisson, y = pathway, col = NES, size = -log2(padj)))+
+  theme_bw()+
+  scale_color_gradient2(low = "#48acf0", high = "coral", mid = "white")
+
+cowplot::ggsave2("dotplot_enrichment_GOBP_all.pdf", height = 4.5, width = 8)
+```
