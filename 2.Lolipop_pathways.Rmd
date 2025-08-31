@@ -1,0 +1,162 @@
+---
+title: "Intersect_GO"
+author: "Iza"
+date: "2025-02-14"
+output: html_document
+---
+
+This document is your **exact** script with added comments only. I did **not** change any code, names, thresholds, or paths. Caveats are marked with `# NOTE:` inside the chunks.
+
+```{r}
+# NOTE: These RDS/CSV paths contain repeated "GO_results/GO_results" and mixed folders.
+# I am not changing them—just flagging in case you hit file-not-found errors.
+corrvalue_RJ_ctrl<-readRDS("results/tables/GO_results/GO_results/res_corrvalue_RJ_ctrl.rds")
+
+corrvalue_BE_ctrl<-readRDS("results/tables/GO_results/GO_results/res_corrvalue_BE_ctrl.rds")
+
+# DESeq2 result tables (CSV with row-wise names)
+deseq2_RJ_ctrl<-read_csv("results/tables/GO_results/DESeq_results/res_shr_OROV_RJ_vs_ctrl_rn.csv")
+
+deseq2_BE_ctrl<-read_csv("results/tables/GO_results/DESeq_results/res_shr_OROV_BE_vs_ctrl_rn.csv")
+
+
+# NOTE: These CSVs omit the ".csv" extension for BE_CTRL; left untouched.
+BE_CTRL<-read.csv("results/tables/GO_results/res_corrvalue_BE_ctrl")
+RJ_CTRL<-read.csv("results/tables/GO_results/res_corrvalue_RJ_ctrl.csv")
+RJ_BE<-read.csv("results/tables/GO_results/res_corrvalue_RJ_BE.csv")
+
+# Filter by adjusted p-value < 0.05
+BE_CTRL_filt<-BE_CTRL %>% filter(padj < 0.05)
+RJ_CTRL_filt<-RJ_CTRL %>% filter(padj < 0.05)
+RJ_BE_filt<-RJ_BE %>% filter(padj < 0.05)
+
+# Series of set differences (kept as-is; each overwrites 'testeee')
+# NOTE: The second line overwrites the first. This is your original behavior.
+testeee<-RJ_BE_filt %>% filter(!pathway %in% BE_CTRL_filt$pathway)
+testeee<-RJ_BE_filt %>% filter(!pathway %in% RJ_CTRL_filt$pathway)
+
+testeee<-RJ_CTRL_filt %>% filter(!pathway %in% BE_CTRL_filt$pathway)
+testeee<-BE_CTRL_filt %>% filter(!pathway %in% RJ_CTRL_filt$pathway)
+```
+
+TO plot
+
+```{r}
+# Selected GO:BP terms to visualize
+selected_paths<-c("GOBP_NEGATIVE_REGULATION_OF_NEURON_PROJECTION_DEVELOPMENT",
+"GOBP_NEGATIVE_REGULATION_OF_NEURON_APOPTOTIC_PROCESS",
+"GOBP_NEGATIVE_REGULATION_OF_NERVOUS_SYSTEM_DEVELOPMENT",
+"GOBP_REGULATION_OF_AXONOGENESIS",
+"GOBP_RESPONSE_TO_AXON_INJURY",
+"GOBP_VIRAL_GENE_EXPRESSION",
+"GOBP_VIRAL_RELEASE_FROM_HOST_CELL",
+"GOBP_STRESS_GRANULE_ASSEMBLY",
+"GOBP_HINDBRAIN_DEVELOPMENT",
+"GOBP_TUBE_FORMATION",
+"GOBP_NEURAL_TUBE_FORMATION",
+"GOBP_INTERLEUKIN_10_MEDIATED_SIGNALING_PATHWAY",
+"GOBP_REGULATION_OF_NEUTROPHIL_DEGRANULATION",
+"GOBP_REGULATION_OF_INTRACELLULAR_LIPID_TRANSPORT",
+"GOBP_REGULATION_OF_GLIAL_CELL_DIFFERENTIATION")
+
+# Label comparisons (typo 'comparisson' kept intentionally)
+BE_CTRL<-BE_CTRL %>% mutate(comparisson = "BE_vs_Ctrl")
+RJ_CTRL<-RJ_CTRL %>% mutate(comparisson = "RJ_vs_Ctrl")
+RJ_BE<-RJ_BE %>% mutate(comparisson = "RJ_vs_BE")
+
+# Bind all into one long table
+all_GO_bound<-rbind(BE_CTRL, RJ_CTRL, RJ_BE)
+```
+
+Plotting
+
+```{r}
+library(ggplot2)
+
+# Factor order for x-axis
+all_GO_bound$comparisson<-factor(all_GO_bound$comparisson, levels = c("BE_vs_Ctrl", "RJ_vs_Ctrl", "RJ_vs_BE"))
+
+# Dotplot with NES as color and -log(padj) as size
+all_GO_bound %>%
+  filter(pathway %in% selected_paths & padj < 0.05) %>%
+  ggplot(aes(x = comparisson, y = pathway))+
+  geom_point(aes(size = -log(padj), color = NES))+
+  scale_color_gradient2(high = "coral", low = "#2AB7CA", mid = "white")+
+  scale_size_continuous(range = c(2, 7)) +
+  theme_bw()+
+  scale_x_discrete(guide = guide_axis(angle = 45))
+
+# Save plot
+cowplot::ggsave2("Lolipop_GO_1st_salmblue.pdf", height = 4, width = 7)
+
+# Gene sets for downstream inspection (kept as-is)
+gene_vector<-c("FGF13"  ,  "STMN2",    "HES1",     "SNAPIN",   "B2M"  ,    "IFRD1"  ,  "SPART",   
+ "HDAC2" ,   "DGUOK" ,   "EFNB3"   , "RTCA"     ,"VIM"   ,   "DPYSL3" ,  "EFNB2",   
+"EPHA4"  ,  "NR2F1"   , "CDK5"   ,  "SPOCK1"   ,"FSTL4",    "PTPN9"  ,  "NRP1"  ,   
+ "DRAXIN" ,  "CARM1"   , "SEMA3A"  , "RAB29"  ,  "PTEN"   ,  "THOC2" ,   "FKBP4",   
+ "DENND5A" , "CERS2"   , "PAFAH1B1" ,"EPHA7"    ,"FIGNL2"  , "RGMA"    , "PSEN1" ,   
+"DCC"  ,    "CRMP1"   , "RTN4RL1" , "MAP2"  ,   "SLIT2" ,   "ITM2C"  ,  "RTN4R",   
+ "DTNBP1",   "WNT5A" ,   "SLIT1")
+
+genes_glia<-c("HES5"   ,  "HES1"  ,   "KDM4A"   , "SOX1" ,    "SLC45A3" , "DUSP10" ,  "HDAC2",   
+ "PRMT5" ,   "CXCR4"  ,  "RHEB"  ,   "CTNNB1",   "CDK1",     "PTPRZ1" ,  "ID2"  ,   
+"MDK"  ,    "EPHA4" ,   "LIN28A"  , "ID4"   ,   "SERPINE2")
+
+genes_lipid<-c("ARV1"  , "TMEM97", "SCP2"  , "ANXA2" , "ABCA12")
+
+
+# NOTE: 'TESTEEE' is used below; you redefine it later from corrvalue_* objects.
+# This line uses TESTEEE$leadingEdge[[8]], which assumes those objects have a 'leadingEdge' list.
+# Left untouched.
+teste_2<-deseq2_BE_ctrl %>% filter(rowname %in% TESTEEE$leadingEdge[[8]])
+
+# Redefine TESTEEE from corrvalue_BE_ctrl and corrvalue_RJ_ctrl (each overwrites previous)
+TESTEEE<-corrvalue_BE_ctrl %>%
+  filter(pathway %in% selected_paths & padj < 0.05) 
+
+TESTEEE<-corrvalue_RJ_ctrl %>%
+  filter(pathway %in% selected_paths & padj < 0.05) 
+
+# Exports (kept as-is). NOTE: 'corrvalue_RJ_BE_ctrl' is not defined above.
+data.table::fwrite(corrvalue_RJ_ctrl, file="GOBP_RJ_vs_ctrl.tsv", sep="\t", sep2=c("", " ", ""))
+
+data.table::fwrite(corrvalue_BE_ctrl, file="GOBP_BE_vs_ctrl.tsv", sep="\t", sep2=c("", " ", ""))
+
+data.table::fwrite(corrvalue_RJ_BE_ctrl, file="GOBP_RJ_vs_BE.tsv", sep="\t", sep2=c("", " ", ""))
+```
+
+volc again
+
+```{r}
+library(readr)
+library(readxl)
+library(tidyverse)
+
+# Read Excel versions of DESeq2 outputs (filenames as provided)
+BE_vs_ctrl<-read_excel("res_shr_OROV_BE_vs_ctrl_rn_noNA.xlsx")
+
+RJ_vs_ctrl<-read_excel("res_shr_OROV_RJ_vs_ctrl_rn_noNA.xlsx")
+
+OROV_RJ_vs_OROV_BE<-read_excel("res_shr_OROV_RJ_vs_OROV_BE_rn_noNA.xlsx")
+
+library(EnhancedVolcano)
+
+# Volcano plot for OROV_RJ_vs_OROV_BE (title is "RJ_vs_ctrl" per your original)
+EnhancedVolcano(OROV_RJ_vs_OROV_BE,
+    lab = OROV_RJ_vs_OROV_BE$rowname,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    FCcutoff = 2,
+    selectLab = c("MGAM", "EGR1", "CCN1", "TTN", "LEFTY2", "HES5", "HCN1",
+                  "BZWIP2", "SRP9P1", "ITGAM", "PTAFR", "H2AC19", "ID2", "ANXA2", "ASCL1", "CXCR4"),
+    col = c('grey', 'grey', 'grey', 'salmon'),
+    drawConnectors = TRUE,
+    ylab = "p value",
+    title = "RJ_vs_ctrl",
+    subtitle = NULL, 
+    labSize = 3, 
+    titleLabSize = 18)
+
+# Save plot (path and dimensions preserved)
+cowplot::ggsave2("Plots/Volc_OROV_RJ_vs_OROV_BE.pdf", height = 6, width = 7)
+```

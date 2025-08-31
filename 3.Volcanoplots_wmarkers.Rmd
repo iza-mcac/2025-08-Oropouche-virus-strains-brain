@@ -1,0 +1,152 @@
+---
+title: "final_paper_version"
+author: "Iza"
+date: "2025-07-17"
+output: html_document
+---
+
+This document contains **your original code** with inline comments only. I did **not** modify function calls, variables, thresholds, or paths. Any caveats are noted with `# NOTE:` within the chunks.
+
+```{r}
+# PACKAGES (kept exactly as you listed)
+# Make sure these are installed in the R environment before knitting.
+library(tidyverse)
+library(readr)
+library(ggvenn)
+library(cowplot)
+library(ggVennDiagram)
+library(ggplot2)
+```
+
+Color scheme
+
+```{r}
+# Color palette for comparisons (3 colors defined)
+colors_oro<-c("#3F7CAC", "#EF959D", "#b8d8ba")
+
+# Names for the three comparisons used to name the colors
+names_colors<-c("BeAn_19991vsMock", "RJ_LVM2024vsMock", "RJ_LVM2024vsBeAn_19991")
+
+# Attach the names to the color vector (names(colors_oro) will show labels)
+names(colors_oro) <- names_colors
+```
+
+read tables
+
+```{r}
+# Read DE result tables from CSV.
+# NOTE: Assumes these files exist and contain at least the columns:
+# - 'rowname' (gene symbol) used later for filtering and labeling
+# - 'log2FoldChange' (numeric)
+# - 'pvalue' (numeric)
+BE_vs_ctrl<-read_csv("results/tables/BE_vs_ctrl_mRNAonly.csv")
+RJ_vs_ctrl<-read_csv("results/tables/RJ_vs_ctrl_mRNAonly.csv")
+RJ_vs_BE<-read_csv("results/tables/OROV_RJ_vs_OROV_BE_mRNAonly.csv")
+```
+
+Protein coding genes
+
+```{r}
+# Annotate genes via Ensembl and keep only protein-coding ones.
+# NOTE: biomaRt uses an internet connection to query Ensembl.
+# If running offline or on a cluster without outbound access, this chunk will fail.
+library(biomaRt)
+library(dplyr)
+library(readr)
+
+# Get gene annotation (Ensembl human)
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Retrieve gene name and biotype
+gene_annot <- getBM(attributes = c("external_gene_name", "gene_biotype"),
+                    mart = mart)
+
+# Keep only protein-coding genes (by external_gene_name / HGNC symbol)
+protein_coding_genes <- gene_annot %>%
+  filter(gene_biotype == "protein_coding") %>%
+  pull(external_gene_name)
+
+# Filter each table to mRNA/protein-coding using 'rowname' column
+# NOTE: Ensure your CSVs have a 'rowname' column with gene symbols.
+BE_vs_ctrl_mRNAonly<-BE_vs_ctrl %>% filter(rowname %in%protein_coding_genes)
+RJ_vs_BE_mRNAonly<-RJ_vs_BE %>% filter(rowname %in%protein_coding_genes)
+RJ_vs_ctrl_mRNAonly<-RJ_vs_ctrl  %>% filter(rowname %in%protein_coding_genes)
+
+# Export filtered tables as XLSX using WriteXLS (kept as-is)
+# NOTE: WriteXLS requires Perl. If not installed, this will error.
+WriteXLS::WriteXLS(BE_vs_ctrl_mRNAonly, "results/tables/BE_vs_ctrl_mRNAonly.xlsx")
+
+WriteXLS::WriteXLS(RJ_vs_BE_mRNAonly, "results/tables/RJ_vs_BE_mRNAonly.xlsx")
+
+WriteXLS::WriteXLS(RJ_vs_ctrl_mRNAonly, "results/tables/RJ_vs_ctrl_mRNAonly.xlsx")
+```
+
+Plot volcano
+
+```{r}
+# Genes to highlight on volcano plots (labels)
+genes_to_mark <- c( "SAXO2",    
+           "CCDC83", "ITGAM", "ITGAL", "DOCK8", "IL18", "CCL5", 
+           "HNF1A", "SLC22A10",  "CD22",  "PDE6A", "RHAG", "TNNT2", "SHFL", "CYP26A1", "LSM6", "RGS16")
+
+library(EnhancedVolcano)
+
+# Example filter (not used later; kept as-is)
+higherthan2<-RJ_vs_BE_mRNAonly %>% filter(log2FoldChange > 2)
+
+# Volcano: RJ_vs_BE_mRNAonly (FC cutoff = 2)
+# NOTE: EnhancedVolcano expects columns 'log2FoldChange' and 'pvalue' present.
+EnhancedVolcano(RJ_vs_BE_mRNAonly,
+    lab = RJ_vs_BE_mRNAonly$rowname,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    FCcutoff = 2,
+    selectLab = genes_to_mark,
+    col = c('grey', 'grey', 'grey', 'salmon'),
+    drawConnectors = TRUE,
+    ylab = "p value",
+    title = "RJ_vs_BE",
+    subtitle = NULL, 
+    labSize = 3, 
+    titleLabSize = 18)
+
+# Save volcano plot (kept path and size)
+cowplot::ggsave2("Plots/Volc_OROV_RJ_vs_OROV_BE_f.pdf", height = 6, width = 7)
+
+# Additional gene sets (kept as-is)
+genes_to_mark <- c( "SAXO2",    
+           "CCDC83", "ITGAM", "ITGAL", "DOCK8", "IL18", "CCL5", 
+           "HNF1A", "SLC22A10",  "CD22",  "PDE6A", "RHAG", "TNNT2", "SHFL", "CYP26A1", "LSM6", "RGS16")
+
+yellow_genes <- c(
+ "COL12A1", "COL4A4", "COL1A1"
+)
+
+genes_to_markfinal<-c(genes_to_mark, yellow_genes, "OAS3", "APOBEC3A")
+
+renato_genes <- c("SOX4", "EIF2S1", "METTL9", "EIF3B", "APOBEC3A", 
+                  "OAS3", "TLR6", "RSAD2", "IRF5", "IFIT3", "IFITM10", "ISG20", "MX2", "SAMHD1", "IFIT1B", "SERPINF1", "IFIT2", "ISG20")
+
+library(EnhancedVolcano)
+
+# Example filter (not used later; kept as-is)
+higherthan2<-RJ_vs_ctrl %>% filter(log2FoldChange > 2)
+
+# Volcano: BE_vs_ctrl (FC cutoff = 2)
+EnhancedVolcano(BE_vs_ctrl,
+    lab = BE_vs_ctrl$rowname,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    FCcutoff = 2,
+    selectLab = genes_to_mark,
+    col = c('grey', 'grey', 'grey', 'salmon'),
+    drawConnectors = TRUE,
+    ylab = "p value",
+    title = "Be_vs_Mock",
+    subtitle = NULL, 
+    labSize = 3, 
+    titleLabSize = 18, max.overlaps = 50)
+
+# Save volcano plot (kept path and size)
+cowplot::ggsave2("Plots/Volc_Be_vs_ctrl_f.pdf", height = 6, width = 7)
+```
