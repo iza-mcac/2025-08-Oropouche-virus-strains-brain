@@ -44,7 +44,6 @@ rownames(sampledata) <- vector_samples
 Make dicionary with Transcripts to Gene table for annotation OK
 
 ```{r}
-# função da isoformic em cima da minha anotação
 # Creates tx->gene mapping from GENCODE v47 transcript FASTA
 tx_to_gene_v47 <- make_tx_to_gene(
   file_path = "ref/gencode.v47.transcripts.fa.gz",
@@ -74,7 +73,7 @@ Run tximport
 # Import Salmon quantifications summarized to gene-level using tx2gene
 tximporteddata <- tximport(files_for_tximport, type="salmon", txIn = TRUE, txOut = FALSE, countsFromAbundance = "no", tx2gene = tx_togene_v47, ignoreAfterBar = TRUE)
 
-# Tabela de contagem (gene x sample)
+# (gene x sample)
 txi_counts <-as.data.frame(tximporteddata$counts)
 
 # Keep a copy named orov_counts (as in your original script)
@@ -150,7 +149,7 @@ cowplot::ggsave2("Threewayvolcano_nomarkers.pdf",
 
 DESEQ2
 
-BE x control -> preciso cortar pra no minimo 10 counts
+BE x control 
 
 ```{r}
 # Subset colData for BE vs ctrl (first 10 samples: 5 ctrl + 5 OROV_BE)
@@ -167,7 +166,7 @@ tximporteddata_BE_vs_ctrl_10 <- tximporteddata_BE_vs_ctrl
 
 filtered_rows <- rowSums(tximporteddata_BE_vs_ctrl$counts > 10) == ncol(tximporteddata_BE_vs_ctrl$counts)
 
-# Filtra em counts/abundance/length para manter dimensões consistentes
+
 tximporteddata_BE_vs_ctrl_10$counts <- tximporteddata_BE_vs_ctrl$counts[filtered_rows, ]
 tximporteddata_BE_vs_ctrl_10$abundance <- tximporteddata_BE_vs_ctrl$abundance[filtered_rows, ]
 tximporteddata_BE_vs_ctrl_10$length <- tximporteddata_BE_vs_ctrl$length[filtered_rows, ]
@@ -196,7 +195,7 @@ write_csv(res_shr_OROV_BE_vs_ctrl,"/home/clarisse/transcriptome/idor_neurosphere
 write_csv(res_shr_OROV_BE_vs_ctrl_rn,"/home/clarisse/transcriptome/idor_neurospheres_orov/DESeq_results/res_shr_OROV_BE_vs_ctrl_rn.csv")
 res_pure <- results(dds)
 
-# Tabela sem linhas com NA em log2FC
+
 res_shr_OROV_BE_vs_ctrl_rn_noNA <- res_shr_OROV_BE_vs_ctrl_rn[!is.na(res_shr_OROV_BE_vs_ctrl_rn$log2FoldChange), ]
 
 # Saving the noNAs
@@ -204,14 +203,14 @@ write_xlsx(res_shr_OROV_BE_vs_ctrl_rn_noNA, "/home/clarisse/transcriptome/idor_n
 
 library(writexl)
 
-# Salvar o dataframe como um arquivo Excel
+
 # NOTE: Installing inside a script can cause issues when knitting; keep as-is per your request.
-install.packages("writexl")
+
 excel_res_shr_OROV_BE_vs_ctrl<-rownames_to_column(res_shr_OROV_BE_vs_ctrl, var = "Gene")
 write_xlsx(excel_res_shr_OROV_BE_vs_ctrl, "/home/clarisse/transcriptome/idor_neurospheres_orov/res_shr_OROV_BE_vs_ctrl.xlsx")
 ```
 
-RJ x controle
+RJ x controls
 
 ```{r}
 # Subset for RJ vs ctrl (controls + RJ samples)
@@ -266,7 +265,7 @@ write_xlsx(res_shr_OROV_RJ_vs_ctrl_rn_noNA, "/home/clarisse/transcriptome/idor_n
 res_pure <- results(dds)
 ```
 
-RJ (novo) x BE (antigo) -> o 1o q passo é o antigo!!!!!!
+RJ x BE 
 
 ```{r}
 # Subset for RJ vs BE (the 10 OROV samples only)
@@ -461,7 +460,6 @@ intersect_all<-intersect(rownames(OR_vs_ctrl_genes), rownames(filtered_tables[[3
 
 # Top/bottom by log2FC (150 each)
 # _____________________________________________________________________________________________--
-# top 50 up e down nas 2 tables orov vs ctrl -> aumentamos pra 150 pq 50 tavam poucos genes
 
 top_50_BE_vs_ctrl <- top_n(res_shr_OROV_BE_vs_ctrl, 150, log2FoldChange)
 bottom_50_BE_vs_ctrl <- top_n(res_shr_OROV_BE_vs_ctrl, -150, log2FoldChange)
@@ -487,9 +485,6 @@ genelist<-c("CCN1", "CHAC1","EGR1", "SIK1", "SPRY1" , "TTN", "SELENOWP1", "LEFTY
 
 #View(table(unlist(path_for_plotting$leadingEdge)))
 
-# Carregar bibliotecas
-library(EnhancedVolcano)
-library(cowplot)
 
 # Lista dos data frames para cada plot
 data_for_volcanos <- list(
@@ -747,7 +742,7 @@ df_res_corrvalue_RJ_BE_sel_path  <- df_res_corrvalue_RJ_BE%>%filter(pathway %in%
   mutate(comparisson = "RJ_vs_BE")
 ```
 
-Tabel for plottin
+Table for plotting
 
 ```{r}
 # Combine selected pathway tables for a dotplot (NES color, -log2(padj) size)
