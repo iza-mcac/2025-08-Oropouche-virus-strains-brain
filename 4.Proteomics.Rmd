@@ -1,0 +1,560 @@
+---
+title: "Proteomics"
+author: "Izabela Mamede"
+date: "2025-11-12"
+output: html_document
+---
+
+```{r}
+library(tidyomics)
+library(ggplot2)
+library(fgsea)
+```
+
+load all
+```{r}
+infile <- "data-raw/amica_protein_groups_all.xlsx"  # ajuste o caminho se preciso
+
+raw_prot<-read_xlsx(infile) %>% clean_names()
+
+# --- Pacotes
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(stringr); library(purrr); library(janitor)
+})
+
+# raw_prot já lido; se precisar:
+# raw_prot <- readxl::read_xlsx("amica_protein_groups_all.xlsx", sheet = "amica_protein_groups") |> janitor::clean_names()
+
+# --- Flags de presença de colunas (evita usar '.' dentro do mutate)
+has_gene_names        <- "gene_names" %in% names(raw_prot)
+has_majority_prot_ids <- "majority_protein_i_ds" %in% names(raw_prot)
+has_protein_names     <- "protein_names" %in% names(raw_prot)
+
+# --- 0) Chaves estáveis: gene_symbol + protein_id
+rp <- raw_prot |>
+  mutate(
+    gene_symbol = if (has_gene_names) sub(";.*$", "", gene_names) else NA_character_,
+    gene_symbol = trimws(as.character(gene_symbol)),
+    protein_id  = dplyr::case_when(
+      has_majority_prot_ids ~ as.character(majority_protein_i_ds),
+      has_protein_names     ~ as.character(protein_names),
+      TRUE                  ~ NA_character_
+    )
+  ) |>
+  filter(!is.na(gene_symbol), gene_symbol != "")
+
+# --- 1) LONG único parseando stat + grupos a partir do nome da coluna (snake_case)
+long_all <- rp |>
+  select(
+    gene_symbol, protein_id,
+    matches("^(log_fc|adj_p_val|p_value)_(orov|be_an)_vs_(mock|be_an)$")
+  ) |>
+  pivot_longer(
+    cols = matches("^(log_fc|adj_p_val|p_value)_(orov|be_an)_vs_(mock|be_an)$"),
+    names_to = c("stat","g1","g2"),
+    names_pattern = "^(log_fc|adj_p_val|p_value)_(orov|be_an)_vs_(mock|be_an)$",
+    values_to = "value",
+    values_transform = list(value = as.numeric)
+  ) |>
+  mutate(
+    comparison = dplyr::case_when(
+      g1 == "be_an" & g2 == "mock"  ~ "BE_vs_Ctrl",
+      g1 == "orov"  & g2 == "mock"  ~ "RJ_vs_Ctrl",
+      g1 == "orov"  & g2 == "be_an" ~ "RJ_vs_BE",
+      TRUE ~ paste0(g1,"_vs_",g2)
+    ),
+    stat = dplyr::recode(stat,
+                         "log_fc"    = "logfc",
+                         "adj_p_val" = "adjpvalue",
+                         "p_value"   = "pvalue")
+  ) |>
+  filter(!is.na(comparison))
+
+# --- 2) Colapsar duplicatas exatas por (gene, protein, comparison, stat)
+#     (sem usar first(); pegamos o primeiro não-NA na mão)
+long_collapsed <- long_all |>
+  group_by(gene_symbol, protein_id, comparison, stat) |>
+  summarise(
+    value = {
+      v <- value[!is.na(value)]
+      if (length(v) == 0L) NA_real_ else v[1]
+    },
+    .groups = "drop"
+  )
+
+# --- 3) WIDE mantendo variantes por proteína e rotulando como GENE_1, GENE_2, ...
+dat_prot_variants <- long_collapsed |>
+  pivot_wider(
+    id_cols     = c(gene_symbol, protein_id, comparison),
+    names_from  = stat,
+    values_from = value,
+    values_fill = NA_real_
+  ) |>
+  arrange(gene_symbol, protein_id, comparison) |>
+  group_by(gene_symbol) |>
+  mutate(variant_symbol = paste0(gene_symbol, "_", dense_rank(factor(protein_id)))) |>
+  ungroup() |>
+  mutate(comparison = factor(comparison, levels = c("BE_vs_Ctrl","RJ_vs_Ctrl","RJ_vs_BE")))
+
+```
+
+Plotting
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(stringr)
+  library(msigdbr); library(fgsea); library(ggplot2)
+})
+
+
+gene_level <- dat_prot_variants %>%
+  group_by(comparison, gene_symbol) %>%
+  summarise(
+    logfc_gene = {
+      v <- logfc[!is.na(logfc)]
+      if (length(v) == 0L) NA_real_ else v[which.max(abs(v))][1]
+    },
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(logfc_gene)) %>%
+  mutate(comparison = factor(comparison, levels = c("BE_vs_Ctrl","RJ_vs_Ctrl","RJ_vs_BE")))
+
+# ------------------------------------------------------------------
+# 2) Gene sets GO:BP (msigdbr)
+
+# --- FGSEA only GO:BP (multilevel), no KEGG ---
+
+suppressPackageStartupMessages({
+  library(dplyr); library(msigdbr); library(fgsea); library(tidyr); library(stringr); library(ggplot2)
+})
+
+
+
+# 1) Gene sets GO:BP
+msig_go <- msigdbr(species = "Homo sapiens", category = "C5", subcategory = "GO:BP") %>%
+  dplyr::select(gs_name, gene_symbol)
+gmt_go  <- split(msig_go$gene_symbol, msig_go$gs_name)
+
+# 2) Multilevel FGSEA helper
+run_fgsea_gobp <- function(df_comp) {
+  ranks <- setNames(df_comp$logfc_gene, df_comp$gene_symbol)
+  ranks <- ranks[!is.na(ranks)]
+  if (any(duplicated(names(ranks)))) {
+    ranks <- tapply(ranks, names(ranks), function(v) v[which.max(abs(v))])
+  }
+  fgsea(pathways = gmt_go, stats = ranks, minSize = 10, maxSize = 2000) %>%
+    tibble::as_tibble()
+}
+
+# 3) Run per comparison
+fgsea_go <- gene_level %>%
+  dplyr::group_by(comparison) %>%
+  dplyr::group_modify(~ run_fgsea_gobp(.x)) %>%
+  dplyr::ungroup() %>%
+  dplyr::rename(pathway = pathway, NES = NES, padj = padj) %>%
+  dplyr::mutate(comparisson = factor(comparison, levels = c("BE_vs_Ctrl","RJ_vs_Ctrl","RJ_vs_BE")))
+
+selected_paths<-c(
+  "GOBP_RESPONSE_TO_TYPE_I_INTERFERON",
+  "GOBP_WNT_SIGNALING_PATHWAY",
+  "GOBP_LONG_TERM_SYNAPTIC_POTENTIATION",
+  "GOBP_RESPONSE_TO_CALCIUM_ION",
+  "GOBP_CANONICAL_WNT_SIGNALING_PATHWAY",
+  "GOBP_CHEMOKINE_PRODUCTION",
+  "GOBP_POSITIVE_REGULATION_OF_SYNAPTIC_TRANSMISSION",
+  "GOBP_CYTOPLASMIC_TRANSLATION",
+  "GOBP_TRANSLATION",
+  "GOBP_RIBOSOME_ASSEMBLY"
+)
+
+
+
+# dotplot right after (same palette):
+selected_paths <- fgsea_go %>%
+  dplyr::filter(pval < 0.05) %>%
+  dplyr::filter(pathway %in% selected_paths
+  ) %>%
+  dplyr::arrange(padj) %>%
+  dplyr::pull(pathway) %>%
+  unique() 
+
+#saving if need
+#data.table::fwrite(selected_paths, file="fgsea.tsv", sep="\t", sep2=c("", " ", ""))
+
+p_dot_gobp <- fgsea_go %>%
+  dplyr::filter(pathway %in% selected_paths) %>%
+  ggplot(aes(x = comparisson, y = pathway)) +
+  geom_point(aes(size = -log(padj), color = NES)) +
+  scale_color_gradient2(high = "coral", low = "#2AB7CA", mid = "white") +
+  scale_size_continuous(range = c(2, 7)) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  labs(x = NULL, y = NULL, color = "NES", size = "-log(padj)")
+
+#saving if need
+# ggsave("Fig5A_GO_BP_only_dotplot.pdf", p_dot_gobp, width = 8, height = 6)
+
+
+ggsave("Fig5A_GO_BP_only_dotplot_sel.pdf", p_dot_gobp, width = 7, height = 4)
+
+# without RJ_vs_BE
+p_dot_noRJBE <- fgsea_go %>%
+  filter(pathway %in% selected_paths,
+         comparisson != "RJ_vs_BE") %>%
+  ggplot(aes(x = comparisson, y = pathway)) +
+  geom_point(aes(size = -log(padj), color = NES)) +
+  scale_color_gradient2(high = "coral", low = "#2AB7CA", mid = "white") +
+  scale_size_continuous(range = c(2, 7)) +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  labs(x = NULL, y = NULL, color = "NES", size = "-log(padj)")
+
+ggsave("Fig5A_GO_BP_only_dotplot_noRJvsBE_sel.pdf", p_dot_noRJBE, width = 7, height = 4)
+```
+
+```{r}
+########################
+# volcano plot 
+
+genes_to_mark<- c( "OROV_M", "OROV_NSs", "OROV_L", "OROV_N", "COL6A1",
+                   "COL18A1", "COL4A6", "COL4A5", "COL2A1", "EMX2",
+                   "POLR2G", "RPL39", "LGALS7", "LGALS1", "LAMB1", "ITGA2",
+                   "SLIT2", "SULF2")
+
+
+RJ_vs_Ctrl_only<-dat_prot_aug %>%
+  filter(comparison == "RJ_vs_Ctrl") 
+
+
+RJ_vs_Ctrl_only %>%
+  EnhancedVolcano(lab = RJ_vs_Ctrl_only$gene_symbol,
+    x = 'logfc',
+    y = 'pvalue',
+    FCcutoff = 1,
+    selectLab = genes_to_mark,
+    col = c('grey', 'grey', 'grey', 'salmon'),
+    drawConnectors = TRUE,
+    ylab = "p value",
+    title = "RJ_vs_Mock",
+    pCutoff = 0.05,
+    subtitle = NULL, 
+    labSize = 3, 
+    titleLabSize = 18)
+
+cowplot::ggsave2("Plots/Volc_Prot_RJ_vs_Mock.pdf", height = 6, width = 7)
+
+
+Be_vs_Ctrl_only<-dat_prot_aug %>%
+  filter(comparison == "BE_vs_Ctrl") 
+
+
+Be_vs_Ctrl_only %>%
+  EnhancedVolcano(lab = Be_vs_Ctrl_only$gene_symbol,
+    x = 'logfc',
+    y = 'pvalue',
+    FCcutoff = 1,
+    selectLab = genes_to_mark,
+    col = c('grey', 'grey', 'grey', 'salmon'),
+    drawConnectors = TRUE,
+    ylab = "p value",
+    title = "BeAn_vs_Mock",
+    pCutoff = 0.05,
+    subtitle = NULL, 
+    labSize = 3, 
+    titleLabSize = 18)
+
+cowplot::ggsave2("Plots/Volc_Prot_BeAn_vs_Mock.pdf", height = 6, width = 7)
+
+
+#markers by category
+
+markers_tbl <- tribble(
+  ~Category,            ~Genes,
+  "Neurons",            "ACOT7, APBB1, APP, CADM3, CELF3, CHN1, CPE, DCLK2, ELAVL3, KIF1A, KIF1B, KIF5A, LRRN1, PFN2, PLCH1, SEZ6L2, TUBA1A, TUBB2A, UNC119",
+  "Astrocytes",         "NCAM",
+  "NSC",                "EMX2, MSI1, OTX2, DCHS1, NDE1",
+  "ECM / Adhesion",     "COL6A1, COL18A1, LAMB1, ITGA2, SLIT2, SULF2"
+) %>%
+  separate_rows(Genes, sep = ",\\s*") %>%
+  rename(gene_symbol = Genes) %>%
+  mutate(gene_symbol = trimws(gene_symbol))
+
+panelD_df <- dat_prot_aug%>%
+  filter(comparison %in% c("BE_vs_Ctrl","RJ_vs_Ctrl")) %>%
+  inner_join(markers_tbl, by = "gene_symbol") %>%
+  mutate(
+    neg_log10_p = -log2(pmax(adjpvalue, 1e-300)),
+    comparison = factor(comparison, levels = c("BE_vs_Ctrl","RJ_vs_Ctrl"))
+  )
+
+
+panelD_df %>%
+  ggplot(aes(x = comparison, y = gene_symbol)) +
+  geom_point(aes(size = neg_log10_p, color = logfc)) +
+  scale_color_gradient2(low = "#2AB7CA", mid = "white", high = "coral") +
+  scale_size_continuous(range = c(2, 8)) +
+  facet_grid(Category ~ ., scales = "free_y", space = "free_y") +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey95"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(x = NULL, y = NULL, color = "logFC", size = "-log10(adjp)")
+
+
+
+cowplot::ggsave2("Plots/Fig5D_markers_bubble.pdf",width = 5, height = 8)
+
+panelD_df %>%
+  ggplot(aes(x = comparison, y = gene_symbol)) +
+  geom_tile(aes(fill = logfc), color = "grey8") +
+  scale_fill_gradient2(low = "#2AB7CA", mid = "white", high = "coral") +
+  facet_grid(.~Category, scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey95"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  coord_flip()
+
+cowplot::ggsave2("Plots/5DHeatmap_markers.pdf",width = 10, height = 2)
+
+
+panelD_df %>%
+  ggplot(aes(x = comparison, y = gene_symbol)) +
+  geom_tile(aes(fill = logfc), color = "grey8") +
+  scale_fill_gradient2(low = "#2AB7CA", mid = "white", high = "coral") +
+  facet_grid(Category~., scales = "free", space = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey95"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) 
+
+cowplot::ggsave2("Plots/5DHeatmap_markers_empe.pdf",width = 3, height = 10)
+
+#side by side
+plot_grid(p_BE, p_RJ, labels = c("B","C"), ncol = 2) %>%
+  ggsave("Fig5B_C_volcanos_side_by_side.pdf", width = 12.5, height = 5.5)
+
+
+dat_prot_aug_test<- dat_prot_aug %>% filter(gene_symbol %in% astro_markers & pvalue < 0.05)
+
+dat_prot_aug_test
+
+```
+
+The second proteomics data
+
+```{r}
+raw_prot$lfq_intensity_m01
+
+mock_intensities<-raw_prot %>% select(gene_names, protein_names, lfq_intensity_m01,
+                    lfq_intensity_m02, lfq_intensity_m03)
+
+mock_intensities$lfq_intensity_m01<-as.numeric(mock_intensities$lfq_intensity_m01)
+
+mock_intensities$lfq_intensity_m02<-as.numeric(mock_intensities$lfq_intensity_m02)
+
+mock_intensities$lfq_intensity_m03<-as.numeric(mock_intensities$lfq_intensity_m03)
+
+mock_intensities_clean <- na.omit(mock_intensities)   # no cols=, this checks all columns
+
+```
+
+Read the 30 and the 60 days
+```{r}
+Day_30_org<-read_excel("data-raw/30 days for comparison.xlsx", sheet = 2)
+Day_60_org<-read_excel("data-raw/60 days for comparison.xlsx")
+
+# 1) Your genes (HGNC symbols)
+genes <- Day_30_org$`30 days`   # <<< troca pelos seus
+
+# 2) Choose databases
+dbs <- c(
+  "GO_Biological_Process_2023"
+)
+
+# 3) Run Enrichr (single call, no loop, no function)
+enr_list <- enrichr(genes, dbs)
+
+genes <- your_gene_vector  # e.g. c("TP53", "MYC", "EGFR")
+
+## Convert SYMBOL -> ENTREZ
+gene_df <- bitr(
+  genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+entrez_genes <- unique(gene_df$ENTREZID)
+
+## GO Biological Process
+ego_bp <- enrichGO(
+  gene          = entrez_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2,
+  readable      = TRUE
+)
+
+head(go_bp_sig)
+neuron_markers <- c(
+  # core / cytoskeleton
+  "RBFOX3","MAP2","TUBB3","NEFL","NEFM","NEFH","INA","GAP43",
+  # synaptic machinery
+  "SYN1","SYN2","SYN3","SYP","SYT1","STX1A","STX1B","STXBP1","VAMP2",
+  "DLG1","DLG2","DLG3","DLG4","SHANK1","SHANK2","SHANK3","HOMER1",
+  "NRXN1","NRXN2","NRXN3","NLGN1","NLGN2","NLGN3","CNTNAP2",
+  # neurotransmission / transporters
+  "SLC17A7","SLC17A6","SLC32A1","SLC6A1","SLC6A3","SLC6A4","SLC6A5",
+  # receptors & channels (glutamate / GABA / ion channels)
+  "GRIA1","GRIA2","GRIA3","GRIA4","GRIN1","GRIN2A","GRIN2B","GRIK1","GRIK2","GRIK3","GRIK4","GRIK5",
+  "GABRA1","GABRA2","GABRA3","GABRB2","GABRB3","GABRG2",
+  "SCN1A","SCN2A","SCN8A","KCNQ2","KCNQ3","KCNB1","KCNC1",
+  "CACNA1A","CACNA1B","CACNA1C","CACNA1E",
+  # axon guidance / adhesion
+  "ROBO2","CNTN2","NCAM1","L1CAM","SEMA3A","PLXNA4",
+  # neuronal TFs / development
+  "NEUROD1","NEUROD2","ASCL1","DCX","TBR1","EOMES","FOXG1","PAX6","PROX1",
+  # subtype/examples
+  "TH","CHAT","RELN","CAMK2A","CAMK2B","CAMK2G","SNAP25","VAMP2","SLC12A5","BDNF","NTRK2"
+)
+neuron_markers <- unique(neuron_markers)
+
+# Expanded astrocyte markers (canonical + transporters/metabolism + channels + TFs)
+astro_markers <- c(
+  # canonical
+  "GFAP","AQP4","S100B","ALDH1L1","ALDOC","FABP7","VIM","GJA1","GLUL","CLU","FGFR3",
+  "SPARCL1","SPARC","SERPINA3","ITGA6","ITGB4","NDRG2","CST3","CP",
+  # transporters / neurotransmitter handling
+  "SLC1A2","SLC1A3","SLC6A11","SLC6A9","SLC38A1","SLC38A3","SLC38A5","SLC13A3",
+  # pumps / channels / ionic homeostasis
+  "ATP1A2","ATP1B2","KCNJ10","KCNJ16","KCNJ2","AQP4","MLC1",
+  # lipid & Apo
+  "APOE","ABCA1","ABCA7","LPL",
+  # cytokine/GPCR often enriched in astro
+  "GPR37L1","GPRC5B","PTGDS","SOCS3","STAT3",
+  # TFs & gliogenesis
+  "SOX9","HES5","NFIA","NFIB",
+  # ECM / structural
+  "LAMA2","TNC","VCAN"
+)
+
+
+
+Day_30_org$`30 days`
+
+Day_60_org$`60 days`
+
+mock_intensities_clean$gene_names
+
+```
+EnrichR
+```{r}
+
+## Packages
+library(readxl)
+library(dplyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)   
+
+#unique genes
+genes_30 <- Day_30_org$`30 days` |> unique() |> na.omit()
+genes_60 <- Day_60_org$`60 days` |> unique() |> na.omit()
+
+#symbol to entrez
+genes_30_df <- bitr(
+  genes_30,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+entrez_30 <- unique(genes_30_df$ENTREZID)
+
+
+genes_60_df <- bitr(
+  genes_60,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+
+entrez_60 <- unique(genes_60_df$ENTREZID)
+
+#GO BP for both
+ego_30 <- enrichGO(
+  gene          = entrez_30,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2,
+  readable      = TRUE
+)
+
+go_30_res <- as.data.frame(ego_30)
+
+ego_60 <- enrichGO(
+  gene          = entrez_60,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.2,
+  readable      = TRUE
+)
+
+go_60_res <- as.data.frame(ego_60)
+
+write_xlsx(go_30_res,"EnrichR_GOBP_30days.xlsx")
+write_xlsx(go_60_res,"EnrichR_GOBP_60days.xlsx")
+
+#check neuron/astrocyte terms
+neuron_30   <- go_30_res[grepl("neuron",   go_30_res$Description, ignore.case = TRUE), ]
+astro_30    <- go_30_res[grepl("astrocyte|glial", go_30_res$Description, ignore.case = TRUE), ]
+
+neuron_30<-neuron_30 %>% mutate(class = "30 days")
+neuron_60<-neuron_60 %>% mutate(class = "60 days")
+
+Thirty_and_sixty <-rbind(neuron_30, neuron_60)
+
+Thirty_and_sixty %>%
+  ggplot(aes(x = class, y = Description)) +
+  geom_point(aes(size = -log(p.adjust), fill = -log(p.adjust)),
+             color = "black",shape  = 21) +
+  scale_size_continuous(range = c(2, 7)) +
+  theme_bw() +
+  scale_fill_gradient2(low = "white", high = "coral")+
+  scale_x_discrete(guide = guide_axis(angle = 45)) 
+
+cowplot::ggsave2("GOBP_30vs60.pdf", width = 6, height = 7)
+
+
+neuron_60   <- go_60_res[grepl("neuron",   go_60_res$Description, ignore.case = TRUE), ]
+astro_60    <- go_60_res[grepl("astrocyte|glial", go_60_res$Description, ignore.case = TRUE), ]
+
+
+
+
+head(go_30_res[, c("ID","Description","GeneRatio","p.adjust")])
+head(go_60_res[, c("ID","Description","GeneRatio","p.adjust")])
+
+
+
+
+Be_vs_Ctrl_only_neuronastron<-Be_vs_Ctrl_only %>%
+  filter(gene_symbol %in% c(astro_markers)) 
+
+RJ_vs_Ctrl_only_neuronastron<-RJ_vs_Ctrl_only %>%
+  filter(gene_symbol %in% c(astro_markers))
+```
+
+
