@@ -11,4 +11,5 @@ Raw FASTQ files quality were checked with FastQC and aligned against the human t
 5 Hutchison WJ, Keyes TJ, The tidyomics Consortium, et al. The tidyomics ecosystem: enhancing omic data analyses. Nat Methods 2024; 21: 1166–70.  
 
 **Proteomics**
+
 Processed Proteomics data was imported as an excel sheet and visualization and enrichment were performed for both Proteomics and the RNA-seq with R packages: ggplot2, fgsea and ClusterProfiler::enrichR
