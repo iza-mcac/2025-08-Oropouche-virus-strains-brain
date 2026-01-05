@@ -13,3 +13,7 @@ Raw FASTQ files quality were checked with FastQC and aligned against the human t
 **Proteomics**
 
 Processed Proteomics data was imported as an excel sheet and visualization and enrichment were performed for both Proteomics and the RNA-seq with R packages: ggplot2, fgsea and ClusterProfiler::enrichR
+
+The raw Proteomics data is available on PRIDE
+Project Name: Microcephaly-like phenotype triggered by novel reassortant and prototypic Oropouche Virus strains in brain organoids
+Project accession: PXD072533
